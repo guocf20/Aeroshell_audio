@@ -1,0 +1,34 @@
+# 构建产物
+build/          # Meson 默认构建目录
+install/        # 你之前命令中出现的安装目录
+bin/            # 编译输出的可执行文件
+*.o
+*.a
+*.so
+*.la
+*.lo
+*.o
+*.pc
+.*.swp
+*~
+.deps*
+.dirstamp
+.libs*
+build/
+depcomp
+
+# 临时与缓存文件
+.mesonpy/
+meson-logs/
+meson-private/
+*.pc            # 已经有了，保留
+.deps/
+.dirstamp
+.libs/
+
+# 编辑器与系统
+.vscode/        # 如果你用 VS Code
+.idea/          # 如果你用 CLion
+.*.swp          # Vim 缓存
+*~              # 备份文件
+.DS_Store       # macOS 遗留

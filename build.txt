@@ -1,0 +1,9 @@
+ apt-get install libopus-dev -y
+apt install meson
+apt-get remove meson -y
+python3 setup.py install
+meson . build -Dprefix=$PWD/install
+ninja -C build install
+cd vad;make
+cd install
+g++ main.cpp     -std=c++17 -O2   -I./include  -I./include/api -I./include/webrtc-audio-processing-2/api/audio/ -lpthread -lm     -o aec_process -I./include/webrtc-audio-processing-2/ -L./lib/x86_64-linux-gnu/ -lwebrtc-audio-processing-2   -Wl,-rpath,'$ORIGIN' -lopus -I./vad/include  -L./vad -lwebrtc_vad -I./onnxruntime/include/ -L./onnxruntime/lib -lonnxruntime
