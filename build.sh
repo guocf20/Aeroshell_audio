@@ -1,37 +1,42 @@
 #!/bin/bash
 
-# 项目根目录: /home/audio/test/Aeroshell_audio
-TARGET_DIR="/home/test"
+# 项目名称
+PKG_NAME="aeroshell_audio"
+# 最终打包的临时目录
+DIST_DIR="./${PKG_NAME}_dist"
+# 最终压缩包名称
+OUTPUT_PKG="${PKG_NAME}.tar.gz"
 
+echo ">>> [0/6] 初始化环境与构建 WebRTC <<<"
+# 清理旧的构建和打包目录
+rm -rf  $DIST_DIR $OUTPUT_PKG
+# 编译并安装 WebRTC 到本地 install 目录
+meson . build -Dprefix=$PWD/install
+ninja -C build install
 
-
-echo ">>> [0/5] 构建webrtc音频包 <<<"
-meson . build -Dprefix=$PWD/install;ninja -C build install
-
-echo ">>> [1/5] 检查并解压依赖资源 <<<"
-# 如果 onnxruntime 目录不存在但压缩包存在，则解压
+echo ">>> [1/6] 准备第三方依赖 (ONNX Runtime) <<<"
 if [ ! -d "onnxruntime" ]; then
     if [ -f "onnxruntime-linux-x64-1.23.2.tgz" ]; then
-        echo "解压 ONNX Runtime..."
+        echo "正在解压 ONNX Runtime..."
         tar -xzf onnxruntime-linux-x64-1.23.2.tgz
         mv onnxruntime-linux-x64-1.23.2 onnxruntime
     else
-        echo "错误: 找不到 onnxruntime 目录或压缩包"
+        echo "错误: 缺少 onnxruntime 压缩包"
         exit 1
     fi
 fi
 
-echo ">>> [2/5] 编译 WebRTC VAD 静态库 <<<"
+echo ">>> [2/6] 编译 WebRTC VAD 静态库 <<<"
 if [ -d "vad" ]; then
-    cd vad && make clean && make
-    cd ..
+    # 保持 minimal changes 原则，调用你已有的 Makefile
+    cd vad && make clean && make && cd ..
 else
-    echo "错误: 找不到 vad 源码目录"
+    echo "错误: 找不到 vad 目录"
     exit 1
 fi
 
-echo ">>> [3/5] 执行本地 C++ 构建 <<<"
-# 这里的 -I 路径完全匹配你刚才 find 出来的 WebRTC 2.1 结构
+echo ">>> [3/6] 编译主程序 aec_process <<<"
+# 这里的编译参数已经包含了之前调试通的所有 -I 和 -L
 g++ main.cpp -std=c++17 -O2 \
     -I. \
     -I./install/include \
@@ -51,26 +56,33 @@ g++ main.cpp -std=c++17 -O2 \
     -Wl,-rpath,'$ORIGIN' \
     -o aec_process
 
-if [ $? -eq 0 ]; then
-    echo ">>> 编译成功: aec_process 已生成。"
-else
-    echo ">>> 编译失败。"
-    exit 1
-fi
+if [ $? -ne 0 ]; then echo "编译失败！"; exit 1; fi
 
-echo ">>> [4/5] 自动提取组件到 $TARGET_DIR <<<"
-mkdir -p $TARGET_DIR
-# 拷贝程序和模型
-cp aec_process $TARGET_DIR/
-[ -f "silero_vad.onnx" ] && cp silero_vad.onnx $TARGET_DIR/
+echo ">>> [4/6] 组装发布目录结构 <<<"
+mkdir -p $DIST_DIR
 
-# 拷贝运行时必需的动态库 (自动处理版本号)
-cp ./install/lib/x86_64-linux-gnu/libwebrtc-audio-processing-2.so.1 $TARGET_DIR/
-cp ./onnxruntime/lib/libonnxruntime.so.1 $TARGET_DIR/
+# 拷贝核心文件 (利用 $ORIGIN，所有库和程序放在同一级)
+cp aec_process $DIST_DIR/
+[ -f "silero_vad.onnx" ] && cp silero_vad.onnx $DIST_DIR/
+cp ./install/lib/x86_64-linux-gnu/libwebrtc-audio-processing-2.so.1 $DIST_DIR/
+cp ./onnxruntime/lib/libonnxruntime.so.1 $DIST_DIR/
 
-echo ">>> [5/5] 验证运行环境 <<<"
-cd $TARGET_DIR
-ldd ./aec_process | grep -E "webrtc|onnx"
+# (可选) 增加一个启动脚本，防止环境中有奇葩的 LD_LIBRARY_PATH 干扰
+cat <<EOF > $DIST_DIR/run.sh
+#!/bin/bash
+cd "\$(dirname "\$0")"
+export LD_LIBRARY_PATH=.
+./aec_process
+EOF
+chmod +x $DIST_DIR/run.sh
+
+echo ">>> [5/6] 制作最终压缩包: $OUTPUT_PKG <<<"
+# 进入目录打包，这样解压后不会带长串的路径
+tar -czf $OUTPUT_PKG -C $DIST_DIR .
+
+echo ">>> [6/6] 验证压缩包内容 <<<"
+tar -tvf $OUTPUT_PKG
 
 echo "---------------------------------------"
-echo "构建完成！测试程序位置: $TARGET_DIR/aec_process"
+echo "构建成功！"
+echo "部署方式: 将 $OUTPUT_PKG 拷贝到目标机器，解压后执行 ./run.sh 或 ./aec_process"
