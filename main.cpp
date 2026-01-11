@@ -243,6 +243,7 @@ void ai_response_thread() {
 
             auto session = g_id_map[sid];
 
+            std::cout<<text.c_str()<<std::endl;
             sendto(g_sockfd, text.c_str(), text.size(), 0, (struct sockaddr*)&session->addr, sizeof(session->addr));
 
         }
@@ -306,8 +307,8 @@ int main(int argc, char* argv[]) {
 
     std::thread(receiver_processor_thread).detach();
     std::thread(session_cleaner_thread).detach();
-    // ai_response_thread 请自行根据您的 socket 需求补全
-    // std::thread(ai_response_thread).detach();
+   // ai_response_thread 请自行根据您的 socket 需求补全
+    std::thread(ai_response_thread).detach();
 
     std::cout << ">>> 网关启动, VAD 模式: " << (g_vad_mode == VadMode::kWebRTC ? "WebRTC" : "Silero") << " <<<" << std::endl;
     if (g_vad_mode == VadMode::kSilero) std::cout << ">>> 模型路径: " << g_model_path << std::endl;
