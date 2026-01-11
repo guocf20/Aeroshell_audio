@@ -3,6 +3,11 @@
 # 项目根目录: /home/audio/test/Aeroshell_audio
 TARGET_DIR="/home/test"
 
+
+
+echo ">>> [0/5] 构建webrtc音频包 <<<"
+meson . build -Dprefix=$PWD/install;ninja -C build install
+
 echo ">>> [1/5] 检查并解压依赖资源 <<<"
 # 如果 onnxruntime 目录不存在但压缩包存在，则解压
 if [ ! -d "onnxruntime" ]; then
