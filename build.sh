@@ -44,6 +44,7 @@ g++ main.cpp -std=c++17 -O2 \
     -I./install/include/webrtc-audio-processing-2/api/audio \
     -I./install/include/webrtc-audio-processing-2/modules/audio_processing/include \
     -I./vad/include \
+    -I./3rdparty/spdlog-1.17.0/include\
     -I./onnxruntime/include \
     -L./install/lib/x86_64-linux-gnu \
     -L./vad \
