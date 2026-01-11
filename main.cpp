@@ -207,9 +207,75 @@ void receiver_processor_thread() {
     }
 }
 
-// ai_response_thread 和 session_cleaner_thread 逻辑保持原样...
-void ai_response_thread() { /* ... 原逻辑 ... */ }
-void session_cleaner_thread() { /* ... 原逻辑 ... */ }
+void ai_response_thread() {
+
+    int ai_sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    struct sockaddr_in ai_addr{};
+
+    ai_addr.sin_family = AF_INET;
+
+    ai_addr.sin_port = htons(8001);
+
+    ai_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(ai_sock, (struct sockaddr*)&ai_addr, sizeof(ai_addr)) < 0) return;
+
+
+
+    char buf[4096];
+
+    while (true) {
+
+        ssize_t n = recvfrom(ai_sock, buf, sizeof(buf), 0, nullptr, nullptr);
+
+        if (n < 32) continue;
+
+        std::string sid(buf, 32);
+
+        std::string text(buf + 32, n - 32);
+
+
+
+        std::lock_guard<std::mutex> lock(g_session_mu);
+
+        if (g_id_map.count(sid)) {
+
+            auto session = g_id_map[sid];
+
+            sendto(g_sockfd, text.c_str(), text.size(), 0, (struct sockaddr*)&session->addr, sizeof(session->addr));
+
+        }
+
+    }
+
+}
+
+void session_cleaner_thread() {
+
+    while (true) {
+
+        std::this_thread::sleep_for(std::chrono::seconds(20));
+
+        time_t now = time(nullptr);
+
+        std::lock_guard<std::mutex> lock(g_session_mu);
+
+        for (auto it = g_sessions.begin(); it != g_sessions.end(); ) {
+
+            if (now - it->second->last_active_time > SESSION_TIMEOUT_SEC) {
+
+                g_id_map.erase(it->second->session_id);
+
+                it = g_sessions.erase(it);
+
+            } else ++it;
+
+        }
+
+    }
+
+}
 
 int main(int argc, char* argv[]) {
     int opt;
