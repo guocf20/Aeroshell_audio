@@ -50,6 +50,14 @@ if [ ! -d "$ONNX_DIR" ]; then
     mv "$THIRD_DIR/onnxruntime-linux-x64-1.23.2" "$ONNX_DIR"
 fi
 
+
+echo ">>> [2.5/6] 修复第三方库 link name <<<"
+
+# ---- ONNX Runtime ----
+if [ -e "$ONNX_DIR/lib/libonnxruntime.so.1" ] && [ ! -e "$ONNX_DIR/lib/libonnxruntime.so" ]; then
+    ln -s libonnxruntime.so.1 "$ONNX_DIR/lib/libonnxruntime.so"
+fi
+
 # ================= [3] 编译 WebRTC VAD =================
 
 echo ">>> [3/6] 编译 WebRTC VAD <<<"
