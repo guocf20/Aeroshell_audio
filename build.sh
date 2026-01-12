@@ -44,11 +44,14 @@ g++ main.cpp -std=c++17 -O2 \
     -I./install/include/webrtc-audio-processing-2/api/audio \
     -I./install/include/webrtc-audio-processing-2/modules/audio_processing/include \
     -I./vad/include \
+    -I./3rdparty/ten_vad \
     -I./3rdparty/spdlog-1.17.0/include\
     -I./onnxruntime/include \
+     -L./3rdparty/ten_vad \
     -L./install/lib/x86_64-linux-gnu \
     -L./vad \
     -L./onnxruntime/lib \
+    -lten_vad \
     -lwebrtc-audio-processing-2 \
     -lwebrtc_vad \
     -lonnxruntime \
@@ -67,6 +70,7 @@ cp aec_process $DIST_DIR/
 [ -f "silero_vad.onnx" ] && cp silero_vad.onnx $DIST_DIR/
 cp ./install/lib/x86_64-linux-gnu/libwebrtc-audio-processing-2.so.1 $DIST_DIR/
 cp ./onnxruntime/lib/libonnxruntime.so.1 $DIST_DIR/
+cp ./3rdparty/ten_vad/libten_vad.so $DIST_DIR/
 
 # (可选) 增加一个启动脚本，防止环境中有奇葩的 LD_LIBRARY_PATH 干扰
 cat <<EOF > $DIST_DIR/run.sh

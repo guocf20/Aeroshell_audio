@@ -21,8 +21,10 @@
 
 
 #include "audio_processing.h"
+
 #include "webrtc_vad.h"
 #include "SileroVadDetector.hpp"
+#include "ten_vad.h"
 
 using namespace webrtc;
 
@@ -41,7 +43,12 @@ static constexpr int SESSION_UDP_TIMEOUT_SEC    = 30;
 static constexpr int SESSION_SPEECH_TIMEOUT_SEC = 120;
 static constexpr int STT_PORT = 9000;
 
-enum class VadMode { kSilero = 0, kWebRTC = 1 };
+enum class VadMode {
+    kSilero  = 0,
+    kWebRTC = 1,
+    kTenVad = 2
+};
+
 
 VadMode g_vad_mode = VadMode::kSilero;
 std::string g_model_path = "./silero_vad.onnx";
@@ -69,9 +76,17 @@ public:
     OpusDecoder* decoder = nullptr;
     rtc::scoped_refptr<AudioProcessing> apm;
 
+  
     VadMode mode;
+    //webrtc vad
     VadInst* webrtc_vad_inst = nullptr;
+
+    //silero vad
     std::unique_ptr<SileroVadDetector> silero_vad_detector;
+
+    //ten vad
+   ten_vad_handle_t ten_vad = nullptr;
+    
     std::vector<float> pcm_buffer;
 
     bool is_speaking   = false;
@@ -97,13 +112,26 @@ public:
             webrtc_vad_inst = WebRtcVad_Create();
             WebRtcVad_Init(webrtc_vad_inst);
             WebRtcVad_set_mode(webrtc_vad_inst, 3);
-        } else {
+        }else if (mode == VadMode::kSilero){
             SileroVadDetector::Config vad_cfg;
             vad_cfg.model_path = g_model_path;
             vad_cfg.threshold  = 0.5f;
             silero_vad_detector = std::make_unique<SileroVadDetector>(vad_cfg);
             pcm_buffer.reserve(512);
         }
+        else if (mode == VadMode::kTenVad) {
+
+size_t hop_size = kFrameSize;   // 160 samples = 10ms @ 16kHz
+float threshold = 0.5f;
+
+if (ten_vad_create(&ten_vad, hop_size, threshold) != 0) {
+    LOGE("[TenVAD] create failed");
+    ten_vad = nullptr;
+} else {
+    LOGI("[TenVAD] initialized (hop={}, th={})", hop_size, threshold);
+}
+
+}
 
         last_active_time = time(nullptr);
         last_speech_time = last_active_time;
@@ -112,7 +140,12 @@ public:
     ~AudioSession() {
         if (decoder) opus_decoder_destroy(decoder);
         if (webrtc_vad_inst) WebRtcVad_Free(webrtc_vad_inst);
+   if (ten_vad) {
+    ten_vad_destroy(&ten_vad);
+    ten_vad = nullptr;
+}
         LOGI("[Session] destroyed {}", session_id);
+        
     }
 };
 
@@ -192,59 +225,125 @@ void receiver_processor_thread() {
 
     while (true) {
         ssize_t n = recvfrom(
-            g_sockfd, buffer, sizeof(buffer), 0,
-            (sockaddr*)&cli_addr, &cli_len
+            g_sockfd,
+            buffer,
+            sizeof(buffer),
+            0,
+            (sockaddr*)&cli_addr,
+            &cli_len
         );
-        if (n < 4) continue;
+        if (n < 4) {
+            continue;
+        }
 
+        /* ---------- 会话 key ---------- */
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &cli_addr.sin_addr, ip, sizeof(ip));
-        std::string key = std::string(ip) + ":" + std::to_string(ntohs(cli_addr.sin_port));
+        std::string key =
+            std::string(ip) + ":" + std::to_string(ntohs(cli_addr.sin_port));
 
         std::shared_ptr<AudioSession> sess;
 
+        /* ---------- 会话获取 / 创建 ---------- */
         {
             std::lock_guard<std::mutex> lk(g_session_mu);
+
             auto it = g_sessions.find(key);
             if (it == g_sessions.end()) {
                 sess = std::make_shared<AudioSession>(g_vad_mode);
                 sess->addr = cli_addr;
+
                 g_sessions[key] = sess;
                 g_id_map[sess->session_id] = sess;
+
                 LOGI("New session {} {}", key, sess->session_id);
             } else {
                 sess = it->second;
             }
+
             sess->last_active_time = time(nullptr);
         }
 
+        /* ---------- Opus 解码 ---------- */
         uint16_t len = (buffer[0] << 8) | buffer[1];
-        int16_t near[kFrameSize], ref[kFrameSize], out[kFrameSize];
 
-        if (opus_decode(sess->decoder, buffer + 2, len, near, kFrameSize, 0) < 0)
+        int16_t near[kFrameSize];
+        int16_t ref[kFrameSize];
+        int16_t out[kFrameSize];
+
+        if (opus_decode(
+                sess->decoder,
+                buffer + 2,
+                len,
+                near,
+                kFrameSize,
+                0) < 0)
+        {
             continue;
+        }
 
+        /* ---------- AEC + NS ---------- */
         memset(ref, 0, sizeof(ref));
         sess->apm->ProcessReverseStream(ref, sconf, sconf, nullptr);
         sess->apm->ProcessStream(near, sconf, sconf, out);
 
+        /* ---------- VAD 分发 ---------- */
         if (sess->mode == VadMode::kWebRTC) {
-            bool v = WebRtcVad_Process(sess->webrtc_vad_inst, kSampleRate, out, kFrameSize) == 1;
-            handle_vad_logic(sess, v, out, 50);
-        } else {
-            for (int i = 0; i < kFrameSize; ++i)
+
+            bool is_voice =
+                (WebRtcVad_Process(
+                     sess->webrtc_vad_inst,
+                     kSampleRate,
+                     out,
+                     kFrameSize) == 1);
+
+            handle_vad_logic(sess, is_voice, out, 50);
+        }
+        else if (sess->mode == VadMode::kSilero) {
+
+            for (int i = 0; i < kFrameSize; ++i) {
                 sess->pcm_buffer.push_back(out[i] / 32768.f);
+            }
 
             if (sess->pcm_buffer.size() >= 512) {
-                bool v = sess->silero_vad_detector->is_speech(sess->pcm_buffer);
+                bool is_voice =
+                    sess->silero_vad_detector->is_speech(sess->pcm_buffer);
+
                 sess->pcm_buffer.clear();
-                handle_vad_logic(sess, v, out, 30);
-            } else if (sess->stt_started) {
+                handle_vad_logic(sess, is_voice, out, 30);
+            }
+            else if (sess->stt_started) {
+                // Silero 未满窗时，继续推流
                 send_to_stt(sess->session_id, out, sizeof(out));
             }
         }
+        else if (sess->mode == VadMode::kTenVad) {
+
+            bool is_voice = false;
+
+            if (sess->ten_vad) {
+                float prob = 0.0f;
+                int flag = 0;
+
+                if (ten_vad_process(
+                        sess->ten_vad,
+                        out,
+                        kFrameSize,
+                        &prob,
+                        &flag) == 0)
+                {
+                    is_voice = (flag == 1);
+
+                    // 如需调试概率，可打开
+                    // LOGI("[TenVAD] prob={}", prob);
+                }
+            }
+
+            handle_vad_logic(sess, is_voice, out, 30);
+        }
     }
 }
+
 
 /* ================= 清理线程 ================= */
 
@@ -357,10 +456,12 @@ int main(int argc, char* argv[]) {
 
     int opt;
     while ((opt = getopt(argc, argv, "v:m:h")) != -1) {
-        if (opt == 'v')
-            g_vad_mode = (std::stoi(optarg) == 1)
-                             ? VadMode::kWebRTC
-                             : VadMode::kSilero;
+       if (opt == 'v') {
+    int v = std::stoi(optarg);
+    if (v == 1) g_vad_mode = VadMode::kWebRTC;
+    else if (v == 2) g_vad_mode = VadMode::kTenVad;
+    else g_vad_mode = VadMode::kSilero;
+}
         else if (opt == 'm')
             g_model_path = optarg;
         else {
@@ -386,7 +487,9 @@ int main(int argc, char* argv[]) {
      std::thread(ai_response_thread).detach();
 
     LOGI("Gateway started, VAD={}",
-         g_vad_mode == VadMode::kWebRTC ? "WebRTC" : "Silero");
+     g_vad_mode == VadMode::kWebRTC ? "WebRTC" :
+     g_vad_mode == VadMode::kTenVad ? "TenVAD" :
+                                      "Silero");
 
     while (true)
         std::this_thread::sleep_for(std::chrono::minutes(1));
