@@ -1,56 +1,82 @@
 #!/bin/bash
+set -e
 
-# 项目名称
+# ================= 基本路径 =================
+
+ROOT_DIR="$(pwd)"
+THIRD_DIR="$ROOT_DIR/3rdparty"
+
+WEBRTC_APM_SRC="$THIRD_DIR/webrtc-audio-processing"
+WEBRTC_APM_INSTALL="$WEBRTC_APM_SRC/install"
+
+WEBRTC_VAD_DIR="$THIRD_DIR/webrtc_vad"
+TEN_VAD_DIR="$THIRD_DIR/ten_vad"
+ONNX_DIR="$THIRD_DIR/onnxruntime"
+SILERO_DIR="$THIRD_DIR/silero_vad"
+
 PKG_NAME="aeroshell_audio"
-# 最终打包的临时目录
-DIST_DIR="./${PKG_NAME}_dist"
-# 最终压缩包名称
-OUTPUT_PKG="${PKG_NAME}.tar.gz"
+DIST_DIR="$ROOT_DIR/${PKG_NAME}_dist"
+OUTPUT_PKG="$ROOT_DIR/${PKG_NAME}.tar.gz"
 
-echo ">>> [0/6] 初始化环境与构建 WebRTC <<<"
-# 清理旧的构建和打包目录
-rm -rf  $DIST_DIR $OUTPUT_PKG
-# 编译并安装 WebRTC 到本地 install 目录
+# ================= [0] 清理 =================
+
+echo ">>> [0/6] 清理旧产物 <<<"
+rm -rf "$DIST_DIR" "$OUTPUT_PKG"
+
+# ================= [1] 构建 WebRTC AudioProcessing =================
+
+echo ">>> [1/6] 构建 WebRTC AudioProcessing (第三方目录内) <<<"
+
+cd "$WEBRTC_APM_SRC"
+
 meson . build -Dprefix=$PWD/install
+
+ninja -C build
 ninja -C build install
 
-echo ">>> [1/6] 准备第三方依赖 (ONNX Runtime) <<<"
-if [ ! -d "onnxruntime" ]; then
-    if [ -f "onnxruntime-linux-x64-1.23.2.tgz" ]; then
-        echo "正在解压 ONNX Runtime..."
-        tar -xzf onnxruntime-linux-x64-1.23.2.tgz
-        mv onnxruntime-linux-x64-1.23.2 onnxruntime
-    else
-        echo "错误: 缺少 onnxruntime 压缩包"
+cd "$ROOT_DIR"
+
+# ================= [2] 准备 ONNX Runtime =================
+
+echo ">>> [2/6] 检查 ONNX Runtime <<<"
+
+if [ ! -d "$ONNX_DIR" ]; then
+    TGZ="$THIRD_DIR/onnxruntime-linux-x64-1.23.2.tgz"
+    if [ ! -f "$TGZ" ]; then
+        echo "❌ 缺少 $TGZ"
         exit 1
     fi
+    tar -xzf "$TGZ" -C "$THIRD_DIR"
+    mv "$THIRD_DIR/onnxruntime-linux-x64-1.23.2" "$ONNX_DIR"
 fi
 
-echo ">>> [2/6] 编译 WebRTC VAD 静态库 <<<"
-if [ -d "vad" ]; then
-    # 保持 minimal changes 原则，调用你已有的 Makefile
-    cd vad && make clean && make && cd ..
-else
-    echo "错误: 找不到 vad 目录"
-    exit 1
-fi
+# ================= [3] 编译 WebRTC VAD =================
 
-echo ">>> [3/6] 编译主程序 aec_process <<<"
-# 这里的编译参数已经包含了之前调试通的所有 -I 和 -L
+echo ">>> [3/6] 编译 WebRTC VAD <<<"
+
+cd "$WEBRTC_VAD_DIR"
+make clean
+make
+cd "$ROOT_DIR"
+
+# ================= [4] 编译主程序 =================
+
+echo ">>> [4/6] 编译主程序 aec_process <<<"
+
 g++ main.cpp -std=c++17 -O2 \
-    -I. \
-    -I./install/include \
-    -I./install/include/webrtc-audio-processing-2 \
-    -I./install/include/webrtc-audio-processing-2/api/audio \
-    -I./install/include/webrtc-audio-processing-2/modules/audio_processing/include \
-    -I./vad/include \
-    -I./3rdparty/ten_vad \
-    -I./3rdparty/spdlog-1.17.0/include\
-    -I./onnxruntime/include \
-     -L./3rdparty/ten_vad \
-    -L./install/lib/x86_64-linux-gnu \
-    -L./vad \
-    -L./onnxruntime/lib \
+    -I"$ROOT_DIR" \
+    -I"$WEBRTC_APM_INSTALL/include" \
+    -I"$WEBRTC_APM_INSTALL/include/webrtc-audio-processing-2" \
+    -I"$WEBRTC_APM_INSTALL/include/webrtc-audio-processing-2/api/audio" \
+    -I"$WEBRTC_APM_INSTALL/include/webrtc-audio-processing-2/modules/audio_processing/include" \
+    -I"$WEBRTC_VAD_DIR/include" \
+    -I"$TEN_VAD_DIR" \
+    -I"$ONNX_DIR/include" \
+    -I"$THIRD_DIR/spdlog-1.17.0/include" \
+    -L"$WEBRTC_APM_INSTALL/lib/x86_64-linux-gnu" \
+    -L"$WEBRTC_VAD_DIR" \
+    -L"$TEN_VAD_DIR" \
+    -L"$ONNX_DIR/lib" \
     -lten_vad \
     -lwebrtc-audio-processing-2 \
     -lwebrtc_vad \
@@ -60,34 +86,34 @@ g++ main.cpp -std=c++17 -O2 \
     -Wl,-rpath,'$ORIGIN' \
     -o aec_process
 
-if [ $? -ne 0 ]; then echo "编译失败！"; exit 1; fi
+# ================= [5] 打包 =================
 
-echo ">>> [4/6] 组装发布目录结构 <<<"
-mkdir -p $DIST_DIR
+echo ">>> [5/6] 组装发布目录 <<<"
 
-# 拷贝核心文件 (利用 $ORIGIN，所有库和程序放在同一级)
-cp aec_process $DIST_DIR/
-[ -f "silero_vad.onnx" ] && cp silero_vad.onnx $DIST_DIR/
-cp ./install/lib/x86_64-linux-gnu/libwebrtc-audio-processing-2.so.1 $DIST_DIR/
-cp ./onnxruntime/lib/libonnxruntime.so.1 $DIST_DIR/
-cp ./3rdparty/ten_vad/libten_vad.so $DIST_DIR/
+mkdir -p "$DIST_DIR"
 
-# (可选) 增加一个启动脚本，防止环境中有奇葩的 LD_LIBRARY_PATH 干扰
-cat <<EOF > $DIST_DIR/run.sh
+cp aec_process "$DIST_DIR/"
+cp "$WEBRTC_APM_INSTALL/lib/x86_64-linux-gnu/libwebrtc-audio-processing-2.so.1" "$DIST_DIR/"
+cp "$ONNX_DIR/lib/libonnxruntime.so.1" "$DIST_DIR/"
+cp "$TEN_VAD_DIR/libten_vad.so" "$DIST_DIR/"
+
+if [ -f "$SILERO_DIR/silero_vad.onnx" ]; then
+    # 直接拷贝到发布目录顶级，供程序 ./silero_vad.onnx 使用
+    cp "$SILERO_DIR/silero_vad.onnx" "$DIST_DIR/"
+fi
+
+cat <<EOF > "$DIST_DIR/run.sh"
 #!/bin/bash
 cd "\$(dirname "\$0")"
 export LD_LIBRARY_PATH=.
 ./aec_process
 EOF
-chmod +x $DIST_DIR/run.sh
+chmod +x "$DIST_DIR/run.sh"
 
-echo ">>> [5/6] 制作最终压缩包: $OUTPUT_PKG <<<"
-# 进入目录打包，这样解压后不会带长串的路径
-tar -czf $OUTPUT_PKG -C $DIST_DIR .
+# ================= [6] 压缩 =================
 
-echo ">>> [6/6] 验证压缩包内容 <<<"
-tar -tvf $OUTPUT_PKG
+echo ">>> [6/6] 打包输出 <<<"
+tar -czf "$OUTPUT_PKG" -C "$DIST_DIR" .
 
 echo "---------------------------------------"
-echo "构建成功！"
-echo "部署方式: 将 $OUTPUT_PKG 拷贝到目标机器，解压后执行 ./run.sh 或 ./aec_process"
+echo "✅ 构建完成: $OUTPUT_PKG"
