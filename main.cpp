@@ -43,6 +43,8 @@ static constexpr int SESSION_UDP_TIMEOUT_SEC    = 30;
 static constexpr int SESSION_SPEECH_TIMEOUT_SEC = 120;
 static constexpr int STT_PORT = 9000;
 
+std::unique_ptr<SileroVadDetector> g_silero_vad;
+
 enum class VadMode {
     kSilero  = 0,
     kWebRTC = 1,
@@ -81,8 +83,8 @@ public:
     //webrtc vad
     VadInst* webrtc_vad_inst = nullptr;
 
-    //silero vad
-    std::unique_ptr<SileroVadDetector> silero_vad_detector;
+    // Silero VAD 会话状态（RNN hidden state）
+    std::vector<float> silero_state;
 
     //ten vad
    ten_vad_handle_t ten_vad = nullptr;
@@ -112,13 +114,10 @@ public:
             webrtc_vad_inst = WebRtcVad_Create();
             WebRtcVad_Init(webrtc_vad_inst);
             WebRtcVad_set_mode(webrtc_vad_inst, 3);
-        }else if (mode == VadMode::kSilero){
-            SileroVadDetector::Config vad_cfg;
-            vad_cfg.model_path = g_model_path;
-            vad_cfg.threshold  = 0.5f;
-            silero_vad_detector = std::make_unique<SileroVadDetector>(vad_cfg);
-            pcm_buffer.reserve(512);
-        }
+        }else if (mode == VadMode::kSilero) {
+    silero_state.assign(2 * 1 * 128, 0.0f); // 必须
+    pcm_buffer.reserve(512);
+}
         else if (mode == VadMode::kTenVad) {
 
 size_t hop_size = kFrameSize;   // 160 samples = 10ms @ 16kHz
@@ -301,22 +300,36 @@ void receiver_processor_thread() {
         }
         else if (sess->mode == VadMode::kSilero) {
 
-            for (int i = 0; i < kFrameSize; ++i) {
-                sess->pcm_buffer.push_back(out[i] / 32768.f);
-            }
+    // 1️⃣ int16 → float，累计到 512 samples
+    for (int i = 0; i < kFrameSize; ++i) {
+        sess->pcm_buffer.push_back(out[i] / 32768.0f);
+    }
 
-            if (sess->pcm_buffer.size() >= 512) {
-                bool is_voice =
-                    sess->silero_vad_detector->is_speech(sess->pcm_buffer);
+    bool is_voice = false;
 
-                sess->pcm_buffer.clear();
-                handle_vad_logic(sess, is_voice, out, 30);
-            }
-            else if (sess->stt_started) {
-                // Silero 未满窗时，继续推流
-                send_to_stt(sess->session_id, out, sizeof(out));
-            }
-        }
+    // 2️⃣ Silero 固定 512 window
+    if (sess->pcm_buffer.size() >= 512) {
+
+        is_voice = g_silero_vad->is_speech(
+            sess->pcm_buffer,
+            sess->silero_state   // 每 session 独立 RNN state
+        );
+
+        sess->pcm_buffer.clear();
+
+        // 3️⃣ 进入统一 VAD 状态机
+        handle_vad_logic(sess, is_voice, out, 30);
+    }
+    else if (sess->stt_started) {
+        // 4️⃣ 未满窗但已在说话，音频仍然要推给 STT
+        send_to_stt(
+            sess->session_id,
+            out,
+            sizeof(out)
+        );
+    }
+}
+
         else if (sess->mode == VadMode::kTenVad) {
 
             bool is_voice = false;
@@ -475,6 +488,17 @@ int main(int argc, char* argv[]) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(8000);
+
+    if (g_vad_mode == VadMode::kSilero) {
+    SileroVadDetector::Config cfg;
+    cfg.model_path = g_model_path;
+    cfg.sample_rate = kSampleRate;
+    cfg.threshold = 0.5f;
+
+    g_silero_vad = std::make_unique<SileroVadDetector>(cfg);
+
+    LOGI("[Silero] global model loaded: {}", g_model_path);
+}
 
     if (bind(g_sockfd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         LOGE("Bind failed: {}", strerror(errno));

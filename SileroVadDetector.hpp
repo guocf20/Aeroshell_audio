@@ -1,72 +1,143 @@
+#pragma once
+
 #include <vector>
 #include <string>
 #include <memory>
 #include <cstring>
+
 #include <onnxruntime_cxx_api.h>
 
+/**
+ * Silero VAD 推理引擎（全局单实例）
+ *
+ * 设计原则：
+ * 1. Ort::Env / Ort::Session / Ort::MemoryInfo 只创建一次（重资源）
+ * 2. 不保存任何会话状态（RNN state 由调用方维护）
+ * 3. is_speech 可被多个 session 调用
+ */
 class SileroVadDetector {
 public:
     struct Config {
         std::string model_path;
-        int sample_rate = 16000;
-        float threshold = 0.5f;     // 判定阈值
-        int intra_op_threads = 1;
+        int   sample_rate      = 16000;
+        float threshold        = 0.5f;
+        int   intra_op_threads = 1;
     };
 
-    SileroVadDetector(const Config& config) : config_(config),memory_info_(nullptr) {
-        Ort::SessionOptions session_options;
-        session_options.SetIntraOpNumThreads(config_.intra_op_threads);
-        session_options.SetInterOpNumThreads(1);
-        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    explicit SileroVadDetector(const Config& config)
+        : config_(config),
+          sr_val_(static_cast<int64_t>(config.sample_rate))
+    {
+        // ---------- Session options ----------
+        Ort::SessionOptions opts;
+        opts.SetIntraOpNumThreads(config_.intra_op_threads);
+        opts.SetInterOpNumThreads(1);
+        opts.SetGraphOptimizationLevel(
+            GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "SileroVAD");
-        session_ = std::make_unique<Ort::Session>(*env_, config_.model_path.c_str(), session_options);
-        memory_info_ = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        // ---------- ORT Env ----------
+        env_ = std::make_unique<Ort::Env>(
+            ORT_LOGGING_LEVEL_WARNING,
+            "SileroVAD");
 
-        // 初始化状态 [2, 1, 128]
-        state_.assign(1 * 2 * 1 * 128, 0.0f);
-        sr_val_ = (int64_t)config_.sample_rate;
+        // ---------- ORT Session ----------
+        session_ = std::make_unique<Ort::Session>(
+            *env_,
+            config_.model_path.c_str(),
+            opts);
+
+        // ---------- CPU MemoryInfo ----------
+        // ⚠️ Ort::MemoryInfo 没有默认构造函数，必须这样创建
+        memory_info_ = std::make_unique<Ort::MemoryInfo>(
+            Ort::MemoryInfo::CreateCpu(
+                OrtArenaAllocator,
+                OrtMemTypeDefault));
     }
 
     /**
-     * @brief 核心识别接口
-     * @param pcm_float 归一化后的音频数据 (-1.0 ~ 1.0)
-     * @return true 代表检测到语音 (Speech), false 代表静音 (Silence)
+     * @brief 执行一次 VAD 推理
+     *
+     * @param pcm_float  归一化音频数据（-1 ~ 1），通常 512 samples
+     * @param state      会话独立的 RNN hidden state，尺寸必须是 [2,1,128]
+     *
+     * @return true  : speech
+     *         false : silence
      */
-    bool is_speech(const std::vector<float>& pcm_float) {
-        int64_t input_node_dims[] = {1, (int64_t)pcm_float.size()};
-        int64_t sr_node_dims[] = {1};
-        int64_t state_node_dims[] = {2, 1, 128};
+    bool is_speech(const std::vector<float>& pcm_float,
+                   std::vector<float>& state)
+    {
+        // ----------- Tensor dims -----------
+        int64_t input_dims[] = {1, static_cast<int64_t>(pcm_float.size())};
+        int64_t sr_dims[]    = {1};
+        int64_t state_dims[] = {2, 1, 128};
 
-        const char* input_names[] = {"input", "sr", "state"};
+        // ----------- I/O names -----------
+        const char* input_names[]  = {"input", "sr", "state"};
         const char* output_names[] = {"output", "stateN"};
 
-        std::vector<Ort::Value> input_tensors;
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(memory_info_, const_cast<float*>(pcm_float.data()), pcm_float.size(), input_node_dims, 2));
-        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(memory_info_, &sr_val_, 1, sr_node_dims, 1));
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(memory_info_, state_.data(), state_.size(), state_node_dims, 3));
+        // ----------- Build input tensors -----------
+        std::vector<Ort::Value> inputs;
+        inputs.reserve(3);
 
-        auto output_tensors = session_->Run(Ort::RunOptions{nullptr}, input_names, input_tensors.data(), 3, output_names, 2);
+        // audio input
+        inputs.emplace_back(
+            Ort::Value::CreateTensor<float>(
+                *memory_info_,
+                const_cast<float*>(pcm_float.data()),
+                pcm_float.size(),
+                input_dims,
+                2));
 
-        // 更新状态
-        float* next_state_ptr = output_tensors[1].GetTensorMutableData<float>();
-        std::memcpy(state_.data(), next_state_ptr, state_.size() * sizeof(float));
+        // sample rate
+        inputs.emplace_back(
+            Ort::Value::CreateTensor<int64_t>(
+                *memory_info_,
+                &sr_val_,
+                1,
+                sr_dims,
+                1));
 
-        // 获取得分
-        float score = output_tensors[0].GetTensorMutableData<float>()[0];
+        // RNN state
+        inputs.emplace_back(
+            Ort::Value::CreateTensor<float>(
+                *memory_info_,
+                state.data(),
+                state.size(),
+                state_dims,
+                3));
+
+        // ----------- Run inference -----------
+        auto outputs = session_->Run(
+            Ort::RunOptions{nullptr},
+            input_names,
+            inputs.data(),
+            inputs.size(),
+            output_names,
+            2);
+
+        // ----------- Update RNN state -----------
+        float* next_state =
+            outputs[1].GetTensorMutableData<float>();
+
+        std::memcpy(
+            state.data(),
+            next_state,
+            state.size() * sizeof(float));
+
+        // ----------- Read score -----------
+        float score =
+            outputs[0].GetTensorMutableData<float>()[0];
+
         return score >= config_.threshold;
-    }
-
-    // 重置状态（用于切换不同音频流时调用）
-    void reset() {
-        std::fill(state_.begin(), state_.end(), 0.0f);
     }
 
 private:
     Config config_;
-    std::unique_ptr<Ort::Env> env_;
-    std::unique_ptr<Ort::Session> session_;
-    Ort::MemoryInfo memory_info_;
-    std::vector<float> state_;
+
+    // ORT heavy objects（全局只一份）
+    std::unique_ptr<Ort::Env>        env_;
+    std::unique_ptr<Ort::Session>    session_;
+    std::unique_ptr<Ort::MemoryInfo> memory_info_;
+
     int64_t sr_val_;
 };
