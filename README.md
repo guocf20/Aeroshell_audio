@@ -45,6 +45,14 @@ TenVAD（轻量神经网络 VAD）
 高性能、低延迟
 全流程基于 C/C++ 实现，适合长时间稳定运行。
 
+编译工具：
+apt install python3 python3-pip ninja-build -y
+下载: meson
+meson 默认版本可能过低：
+最新地址：https://github.com/mesonbuild/meson
+python3 setup.py install
+
+
 编译依赖说明
 系统依赖
 
