@@ -58,7 +58,7 @@ Opus 用于音频数据的编码与解码，是整个语音链路的核心组件
 
 apt-get update
 apt-get install -y libopus-dev
-apt install libc++1
+apt install libc++1 libc++-dev libc++abi-dev -y
 
 2. Meson 构建系统
 
