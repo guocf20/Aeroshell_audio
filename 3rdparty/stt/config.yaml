@@ -1,0 +1,12 @@
+server:
+  udp_port: 9000
+  forward_addr: "127.0.0.1:8001"
+  default_model: "volc"
+
+log:
+  path: "./logs/asr-gateway.log" # 设为空则输出到控制台
+  level: "info"                 # debug, info, warn, error
+  max_size: 100                 # 每个文件最大 100MB
+  max_backups: 5                # 保留 5 个旧文件
+  max_age: 7                    # 保留 7 天
+  compress: true                # 旧文件 gzip 压缩
