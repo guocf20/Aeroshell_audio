@@ -73,6 +73,7 @@ echo ">>> [4/6] 编译主程序 aec_process <<<"
 
 g++ main.cpp -std=c++17 -O2 \
     -I"$ROOT_DIR" \
+    -I"$THIRD_DIR" \
     -I"$WEBRTC_APM_INSTALL/include" \
     -I"$WEBRTC_APM_INSTALL/include/webrtc-audio-processing-2" \
     -I"$WEBRTC_APM_INSTALL/include/webrtc-audio-processing-2/api/audio" \

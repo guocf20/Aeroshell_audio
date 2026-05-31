@@ -18,6 +18,8 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
+#include "nlohmann/json.hpp"
+#include <fstream>
 
 
 #include "audio_processing.h"
@@ -27,6 +29,7 @@
 #include "ten_vad.h"
 
 using namespace webrtc;
+using json = nlohmann::json;
 
 /* ================= 日志宏 ================= */
 
@@ -41,7 +44,19 @@ static constexpr int kFrameSize  = 160;
 
 static constexpr int SESSION_UDP_TIMEOUT_SEC    = 30;
 static constexpr int SESSION_SPEECH_TIMEOUT_SEC = 120;
-static constexpr int STT_PORT = 9000;
+
+
+
+struct AppConfig {
+    std::string asr_listen_addr = ":9000";
+    std::string asr_result_addr = "127.0.0.1:8001";
+
+    std::string gateway_listen_addr = ":8000";
+    std::string vad_mode = "silero";
+    std::string silero_model_path = "./silero_vad.onnx";
+};
+
+AppConfig g_config;
 
 std::unique_ptr<SileroVadDetector> g_silero_vad;
 
@@ -57,6 +72,76 @@ std::string g_model_path = "./silero_vad.onnx";
 int g_sockfd;
 
 /* ================= 工具 ================= */
+
+void print_usage(const char* app)
+{
+    LOGI("Usage: {} -c config.json [-v 0|1|2] [-m model_path]", app);
+    LOGI("  -c config.json   config file path");
+    LOGI("  -v 0|1|2          vad mode: 0=silero, 1=webrtc, 2=ten");
+    LOGI("  -m model_path     override silero model path");
+    LOGI("  -h                show help");
+}
+
+bool load_config(const std::string& path)
+{
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        LOGE("open config failed: {}", path);
+        return false;
+    }
+
+    nlohmann::json j;
+    ifs >> j;
+
+    g_config.asr_listen_addr =
+        j.value("asr_listen_addr", ":9000");
+
+    g_config.asr_result_addr =
+        j.value("asr_result_addr", "127.0.0.1:8001");
+
+    if (j.contains("audio_gateway")) {
+        auto gw = j["audio_gateway"];
+
+        g_config.gateway_listen_addr =
+            gw.value("listen_addr", ":8000");
+
+        g_config.vad_mode =
+            gw.value("vad_mode", "silero");
+
+        g_config.silero_model_path =
+            gw.value("silero_model_path", "./silero_vad.onnx");
+    }
+
+    return true;
+}
+
+bool parse_addr(
+    const std::string& addr,
+    std::string& ip,
+    int& port,
+    const std::string& default_ip
+)
+{
+    size_t pos = addr.rfind(':');
+    if (pos == std::string::npos) {
+        return false;
+    }
+
+    ip = addr.substr(0, pos);
+
+    // 关键：不同场景默认 IP 不一样
+    if (ip.empty()) {
+        ip = default_ip;
+    }
+
+    try {
+        port = std::stoi(addr.substr(pos + 1));
+    } catch (...) {
+        return false;
+    }
+
+    return port > 0 && port <= 65535;
+}
 
 std::string generate_uuid() {
     static const char* chars = "0123456789abcdef";
@@ -160,10 +245,24 @@ void send_to_stt(const std::string& sid, const void* data, size_t len) {
     static sockaddr_in stt_addr{};
     static bool init = false;
 
-    if (!init) {
+   if (!init) {
+        std::string ip;
+        int port = 0;
+    
+       if (!parse_addr(
+                g_config.asr_listen_addr,
+                ip,
+                port,
+                "127.0.0.1"
+            )) {
+            LOGE("invalid asr_listen_addr: {}", g_config.asr_listen_addr);
+            return;
+        }
+    
         stt_addr.sin_family = AF_INET;
-        stt_addr.sin_port   = htons(STT_PORT);
-        inet_pton(AF_INET, "127.0.0.1", &stt_addr.sin_addr);
+        stt_addr.sin_port = htons(port);
+        inet_pton(AF_INET, ip.c_str(), &stt_addr.sin_addr);
+    
         init = true;
     }
 
@@ -386,48 +485,75 @@ void session_cleaner_thread() {
     }
 }
 
-void ai_response_thread() {
-
+void ai_response_thread()
+{
     int ai_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ai_sock < 0) {
+        LOGE("create ai socket failed: {}", strerror(errno));
+        return;
+    }
 
-    struct sockaddr_in ai_addr{};
+    std::string result_ip;
+    int result_port = 0;
 
+    if (!parse_addr(
+            g_config.asr_result_addr,
+            result_ip,
+            result_port,
+            "127.0.0.1"
+        )) {
+        LOGE("invalid asr_result_addr: {}", g_config.asr_result_addr);
+        close(ai_sock);
+        return;
+    }
+
+    sockaddr_in ai_addr{};
     ai_addr.sin_family = AF_INET;
+    ai_addr.sin_port = htons(result_port);
 
-    ai_addr.sin_port = htons(8001);
+    // 结果回传一般只本机使用；如果配置是 127.0.0.1，就只监听本机
+    if (result_ip == "0.0.0.0") {
+        ai_addr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, result_ip.c_str(), &ai_addr.sin_addr);
+    }
 
-    ai_addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(ai_sock, (sockaddr*)&ai_addr, sizeof(ai_addr)) < 0) {
+        LOGE("bind ai result addr failed: {} {}", g_config.asr_result_addr, strerror(errno));
+        close(ai_sock);
+        return;
+    }
 
-    if (bind(ai_sock, (struct sockaddr*)&ai_addr, sizeof(ai_addr)) < 0) return;
-
-
+    LOGI("AI result listen on {}", g_config.asr_result_addr);
 
     char buf[4096];
 
     while (true) {
-
         ssize_t n = recvfrom(ai_sock, buf, sizeof(buf), 0, nullptr, nullptr);
 
-        if (n < 32) continue;
+        if (n < 32) {
+            continue;
+        }
 
         std::string sid(buf, 32);
-
         std::string text(buf + 32, n - 32);
-
-
 
         std::lock_guard<std::mutex> lock(g_session_mu);
 
-        if (g_id_map.count(sid)) {
+        auto it = g_id_map.find(sid);
+        if (it != g_id_map.end()) {
+            auto session = it->second;
 
-            auto session = g_id_map[sid];
-
-            sendto(g_sockfd, text.c_str(), text.size(), 0, (struct sockaddr*)&session->addr, sizeof(session->addr));
-
+            sendto(
+                g_sockfd,
+                text.c_str(),
+                text.size(),
+                0,
+                (sockaddr*)&session->addr,
+                sizeof(session->addr)
+            );
         }
-
     }
-
 }
 
 /* ================= 日志初始化 ================= */
@@ -464,41 +590,98 @@ void log_init()
 
 /* ================= main ================= */
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[])
+{
     log_init();
 
     int opt;
-    while ((opt = getopt(argc, argv, "v:m:h")) != -1) {
-       if (opt == 'v') {
-    int v = std::stoi(optarg);
-    if (v == 1) g_vad_mode = VadMode::kWebRTC;
-    else if (v == 2) g_vad_mode = VadMode::kTenVad;
-    else g_vad_mode = VadMode::kSilero;
-}
-        else if (opt == 'm')
-            g_model_path = optarg;
-        else {
-            LOGI("Usage: {} -v [0|1] -m [model_path]", argv[0]);
+    std::string config_path = "config.json";
+
+    int vad_override = -1;
+    std::string model_override;
+
+    while ((opt = getopt(argc, argv, "c:v:m:h")) != -1) {
+        if (opt == 'c') {
+            config_path = optarg;
+        } else if (opt == 'v') {
+            vad_override = std::stoi(optarg);
+        } else if (opt == 'm') {
+            model_override = optarg;
+        } else {
+            print_usage(argv[0]);
             return 0;
         }
     }
 
+    if (!load_config(config_path)) {
+        return -1;
+    }
+
+    // 先读取配置文件中的 VAD
+    if (g_config.vad_mode == "webrtc") {
+        g_vad_mode = VadMode::kWebRTC;
+    } else if (g_config.vad_mode == "ten") {
+        g_vad_mode = VadMode::kTenVad;
+    } else {
+        g_vad_mode = VadMode::kSilero;
+    }
+
+    g_model_path = g_config.silero_model_path;
+
+    // 命令行参数优先级高于配置文件
+    if (vad_override >= 0) {
+        if (vad_override == 1) {
+            g_vad_mode = VadMode::kWebRTC;
+        } else if (vad_override == 2) {
+            g_vad_mode = VadMode::kTenVad;
+        } else {
+            g_vad_mode = VadMode::kSilero;
+        }
+    }
+
+    if (!model_override.empty()) {
+        g_model_path = model_override;
+    }
+
     g_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_sockfd < 0) {
+        LOGE("create udp socket failed: {}", strerror(errno));
+        return -1;
+    }
+
+    std::string listen_ip;
+    int listen_port = 0;
+
+    if (!parse_addr(
+            g_config.gateway_listen_addr,
+            listen_ip,
+            listen_port,
+            "0.0.0.0"
+        )) {
+        LOGE("invalid audio_gateway.listen_addr: {}", g_config.gateway_listen_addr);
+        return -1;
+    }
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(8000);
+    addr.sin_port = htons(listen_port);
+
+    if (listen_ip == "0.0.0.0") {
+        addr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, listen_ip.c_str(), &addr.sin_addr);
+    }
 
     if (g_vad_mode == VadMode::kSilero) {
-    SileroVadDetector::Config cfg;
-    cfg.model_path = g_model_path;
-    cfg.sample_rate = kSampleRate;
-    cfg.threshold = 0.5f;
+        SileroVadDetector::Config cfg;
+        cfg.model_path = g_model_path;
+        cfg.sample_rate = kSampleRate;
+        cfg.threshold = 0.5f;
 
-    g_silero_vad = std::make_unique<SileroVadDetector>(cfg);
+        g_silero_vad = std::make_unique<SileroVadDetector>(cfg);
 
-    LOGI("[Silero] global model loaded: {}", g_model_path);
-}
+        LOGI("[Silero] global model loaded: {}", g_model_path);
+    }
 
     if (bind(g_sockfd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         LOGE("Bind failed: {}", strerror(errno));
@@ -507,14 +690,19 @@ int main(int argc, char* argv[]) {
 
     std::thread(receiver_processor_thread).detach();
     std::thread(session_cleaner_thread).detach();
-        // ai_response_thread 请自行根据您的 socket 需求补全
-     std::thread(ai_response_thread).detach();
+    std::thread(ai_response_thread).detach();
+
+    LOGI("Config file: {}", config_path);
+    LOGI("Gateway listen: {}", g_config.gateway_listen_addr);
+    LOGI("ASR listen addr: {}", g_config.asr_listen_addr);
+    LOGI("ASR result addr: {}", g_config.asr_result_addr);
 
     LOGI("Gateway started, VAD={}",
-     g_vad_mode == VadMode::kWebRTC ? "WebRTC" :
-     g_vad_mode == VadMode::kTenVad ? "TenVAD" :
-                                      "Silero");
+        g_vad_mode == VadMode::kWebRTC ? "WebRTC" :
+        g_vad_mode == VadMode::kTenVad ? "TenVAD" :
+                                         "Silero");
 
-    while (true)
+    while (true) {
         std::this_thread::sleep_for(std::chrono::minutes(1));
+    }
 }
