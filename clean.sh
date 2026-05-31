@@ -10,6 +10,7 @@ THIRD_PARTY="$ROOT_DIR/3rdparty"
 
 echo "[1/6] 清理主程序构建产物"
 rm -f "$ROOT_DIR/aec_process"
+rm -f "$ROOT_DIR/asr_provider"
 
 echo "[2/6] 清理发布目录"
 rm -rf "$ROOT_DIR/aeroshell_audio_dist"
