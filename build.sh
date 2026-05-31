@@ -95,6 +95,27 @@ g++ main.cpp -std=c++17 -O2 \
     -Wl,-rpath,'$ORIGIN' \
     -o aec_process
 
+# ================= [4.5] 编译 Go Provider =================
+
+# ================= [4.5] 编译 Go Provider =================
+
+echo ">>> [4.5/6] 编译 Go Provider <<<"
+
+PROVIDER_DIR="$ROOT_DIR/provider"
+PROVIDER_BIN="asr_provider"
+
+if [ ! -d "$PROVIDER_DIR" ]; then
+    echo "❌ 缺少 provider 目录: $PROVIDER_DIR"
+    exit 1
+fi
+
+cd "$PROVIDER_DIR"
+
+go build -o "$ROOT_DIR/$PROVIDER_BIN" main.go
+
+cd "$ROOT_DIR"
+
+
 # ================= [5] 打包 =================
 
 echo ">>> [5/6] 组装发布目录 <<<"
@@ -102,6 +123,7 @@ echo ">>> [5/6] 组装发布目录 <<<"
 mkdir -p "$DIST_DIR"
 
 cp aec_process "$DIST_DIR/"
+cp "$ROOT_DIR/$PROVIDER_BIN" "$DIST_DIR/"
 cp "$WEBRTC_APM_INSTALL/lib/x86_64-linux-gnu/libwebrtc-audio-processing-2.so.1" "$DIST_DIR/"
 cp "$ONNX_DIR/lib/libonnxruntime.so.1" "$DIST_DIR/"
 cp "$TEN_VAD_DIR/libten_vad.so" "$DIST_DIR/"
@@ -111,12 +133,25 @@ if [ -f "$SILERO_DIR/silero_vad.onnx" ]; then
     cp "$SILERO_DIR/silero_vad.onnx" "$DIST_DIR/"
 fi
 
+
 cat <<EOF > "$DIST_DIR/run.sh"
 #!/bin/bash
+set -e
+
 cd "\$(dirname "\$0")"
+
 export LD_LIBRARY_PATH=.
-./aec_process
+
+
+echo ">>> 启动 ASR Provider <<<"
+./$PROVIDER_BIN -c /etc/aero_audio/config.json > provider.log 2>&1 &
+PROVIDER_PID=\$!
+
+echo ">>> 启动 Audio Gateway <<<"
+./aec_process -c /etc/aero_audio/config.json  2>&1 &
+
 EOF
+
 chmod +x "$DIST_DIR/run.sh"
 
 # ================= [6] 压缩 =================
