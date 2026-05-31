@@ -31,3 +31,8 @@ meson-private/
 .*.swp          # Vim 缓存
 *~              # 备份文件
 .DS_Store       # macOS 遗留
+
+config.json
+.env
+.env.local
+.env.production
