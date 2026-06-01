@@ -449,19 +449,21 @@ void receiver_processor_thread() {
            ref 是扬声器参考音频，用于 AEC。
            如果 ref 解码失败，就退化为空参考音频。
         */
-       /* if (opus_decode(
-                sess->decoder,
-                pkt.ref_payload,
-                pkt.ref_len,
-                ref,
-                kFrameSize,
-                0) < 0)
-        {
+       if (pkt.ref_len > 0 && pkt.ref_payload != nullptr) {
+            if (opus_decode(
+                    sess->decoder,
+                    pkt.ref_payload,
+                    pkt.ref_len,
+                    ref,
+                    kFrameSize,
+                    0) < 0)
+            {
+                memset(ref, 0, sizeof(ref));
+            }
+        } else {
             memset(ref, 0, sizeof(ref));
         }
-        */
-        memset(ref, 0, sizeof(ref));
-        /* ---------- AEC + NS ---------- */
+        
         sess->apm->ProcessReverseStream(ref, sconf, sconf, nullptr);
         sess->apm->ProcessStream(near, sconf, sconf, out);
 

@@ -74,10 +74,8 @@ bool parse_audio_packet(
     pkt.ref_len = read_u16_be(buffer + offset);
     offset += 2;
 
-    if (
-        pkt.ref_len == 0 ||
-        n < offset + pkt.ref_len
-    ) {
+
+    if (n < offset + pkt.ref_len) {
         spdlog::warn(
             "invalid ref_len={}, recv={}",
             pkt.ref_len,
@@ -85,9 +83,9 @@ bool parse_audio_packet(
         );
         return false;
     }
-
-    // ref_opus 起始位置
-    pkt.ref_payload = buffer + offset;
+    
+    // ref_len 为 0 时，表示没有参考音频
+    pkt.ref_payload = pkt.ref_len > 0 ? buffer + offset : nullptr;
 
     return true;
 }
