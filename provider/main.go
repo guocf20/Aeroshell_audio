@@ -555,15 +555,22 @@ func (v *VolcASRClient) Close() {
 }
 
 func (v *VolcASRClient) readLoop() {
+	var latestText string
+
 	for {
 		_, msg, err := v.conn.ReadMessage()
 		if err != nil {
+			// 连接关闭前，只发送最后一次识别文本，避免客户端收到中间结果
+			if latestText != "" {
+				sendResultToGateway(v.SessionID, latestText)
+			}
 			return
 		}
 
 		text := parseVolcResponseText(msg)
 		if text != "" {
-			sendResultToGateway(v.SessionID, text)
+			// 只缓存最新文本，不立即发给客户端
+			latestText = text
 		}
 	}
 }

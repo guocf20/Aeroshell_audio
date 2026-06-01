@@ -19,6 +19,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include "nlohmann/json.hpp"
+#include "audio_udp_packet.h"
 #include <fstream>
 
 
@@ -163,6 +164,10 @@ public:
     OpusDecoder* decoder = nullptr;
     rtc::scoped_refptr<AudioProcessing> apm;
 
+    uint32_t last_seq = 0;
+    bool has_seq = false;
+    uint64_t lost_packets = 0;
+    uint64_t old_packets = 0;
   
     VadMode mode;
     //webrtc vad
@@ -232,6 +237,49 @@ if (ten_vad_create(&ten_vad, hop_size, threshold) != 0) {
         
     }
 };
+
+bool check_audio_seq(
+    const std::shared_ptr<AudioSession>& s,
+    uint32_t seq
+) {
+    if (!s->has_seq) {
+        s->has_seq = true;
+        s->last_seq = seq;
+        return true;
+    }
+
+    if (seq <= s->last_seq) {
+        s->old_packets++;
+
+        LOGW(
+            "drop old packet session={} seq={} last_seq={} old_packets={}",
+            s->session_id,
+            seq,
+            s->last_seq,
+            s->old_packets
+        );
+
+        return false;
+    }
+
+    if (seq > s->last_seq + 1) {
+        uint32_t lost = seq - s->last_seq - 1;
+        s->lost_packets += lost;
+
+        LOGW(
+            "packet lost session={} last_seq={} seq={} lost={} total_lost={}",
+            s->session_id,
+            s->last_seq,
+            seq,
+            lost,
+            s->lost_packets
+        );
+    }
+
+    s->last_seq = seq;
+    return true;
+}
+
 
 /* ================= 全局会话表 ================= */
 
@@ -315,7 +363,7 @@ void handle_vad_logic(
 /* ================= 接收线程 ================= */
 
 void receiver_processor_thread() {
-    uint8_t buffer[8192];
+    uint8_t buffer[8192] = {0};
     sockaddr_in cli_addr{};
     socklen_t cli_len = sizeof(cli_addr);
 
@@ -363,25 +411,57 @@ void receiver_processor_thread() {
         }
 
         /* ---------- Opus 解码 ---------- */
-        uint16_t len = (buffer[0] << 8) | buffer[1];
-
-        int16_t near[kFrameSize];
-        int16_t ref[kFrameSize];
-        int16_t out[kFrameSize];
-
+        /* ---------- UDP 音频包解析 ----------
+           包格式：
+           [magic 4][seq 4][near_len 2][near_opus][ref_len 2][ref_opus]
+        */
+        AudioPacketView pkt;
+        
+        if (!parse_audio_packet(buffer, n, pkt)) {
+            continue;
+        }
+        
+        /* ---------- seq 检查 ----------
+           只丢弃旧包/重复包。
+           不排序、不重传、不补包。
+        */
+        if (!check_audio_seq(sess, pkt.seq)) {
+            continue;
+        }
+        
+        int16_t near[kFrameSize] = {0};
+        int16_t ref[kFrameSize] = {0};
+        int16_t out[kFrameSize] = {0};
+        
+        /* ---------- 解码 near 音频 ---------- */
         if (opus_decode(
                 sess->decoder,
-                buffer + 2,
-                len,
+                pkt.near_payload,
+                pkt.near_len,
                 near,
                 kFrameSize,
                 0) < 0)
         {
             continue;
         }
-
-        /* ---------- AEC + NS ---------- */
+        
+        /* ---------- 解码 ref 音频 ----------
+           ref 是扬声器参考音频，用于 AEC。
+           如果 ref 解码失败，就退化为空参考音频。
+        */
+       /* if (opus_decode(
+                sess->decoder,
+                pkt.ref_payload,
+                pkt.ref_len,
+                ref,
+                kFrameSize,
+                0) < 0)
+        {
+            memset(ref, 0, sizeof(ref));
+        }
+        */
         memset(ref, 0, sizeof(ref));
+        /* ---------- AEC + NS ---------- */
         sess->apm->ProcessReverseStream(ref, sconf, sconf, nullptr);
         sess->apm->ProcessStream(near, sconf, sconf, out);
 
