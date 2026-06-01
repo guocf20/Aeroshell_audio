@@ -138,21 +138,155 @@ cat <<EOF > "$DIST_DIR/run.sh"
 #!/bin/bash
 set -e
 
-cd "\$(dirname "\$0")"
+BASE_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+cd "\$BASE_DIR"
 
-export LD_LIBRARY_PATH=.
+export LD_LIBRARY_PATH="\$BASE_DIR:\${LD_LIBRARY_PATH:-}"
 
+CONFIG_FILE="/etc/aero_audio/config.json"
 
-echo ">>> 启动 ASR Provider <<<"
-./$PROVIDER_BIN -c /etc/aero_audio/config.json > provider.log 2>&1 &
-PROVIDER_PID=\$!
+PROVIDER_BIN="$PROVIDER_BIN"
+GATEWAY_BIN="aec_process"
 
-echo ">>> 启动 Audio Gateway <<<"
-./aec_process -c /etc/aero_audio/config.json  2>&1 &
+PID_DIR="\$BASE_DIR/pids"
+LOG_DIR="\$BASE_DIR/logs"
 
+PROVIDER_PID_FILE="\$PID_DIR/provider.pid"
+GATEWAY_PID_FILE="\$PID_DIR/gateway.pid"
+
+mkdir -p "\$PID_DIR" "\$LOG_DIR"
+
+is_running() {
+    local pid_file="\$1"
+
+    if [ ! -f "\$pid_file" ]; then
+        return 1
+    fi
+
+    local pid
+    pid="\$(cat "\$pid_file")"
+
+    if [ -z "\$pid" ]; then
+        return 1
+    fi
+
+    kill -0 "\$pid" 2>/dev/null
+}
+
+start_provider() {
+    if is_running "\$PROVIDER_PID_FILE"; then
+        echo "ASR Provider 已在运行，PID=\$(cat "\$PROVIDER_PID_FILE")"
+        return
+    fi
+
+    echo ">>> 启动 ASR Provider <<<"
+    "./\$PROVIDER_BIN" -c "\$CONFIG_FILE" > "\$LOG_DIR/provider.log" 2>&1 &
+    echo \$! > "\$PROVIDER_PID_FILE"
+    echo "ASR Provider 启动成功，PID=\$(cat "\$PROVIDER_PID_FILE")"
+}
+
+start_gateway() {
+    if is_running "\$GATEWAY_PID_FILE"; then
+        echo "Audio Gateway 已在运行，PID=\$(cat "\$GATEWAY_PID_FILE")"
+        return
+    fi
+
+    echo ">>> 启动 Audio Gateway <<<"
+    "./\$GATEWAY_BIN" -c "\$CONFIG_FILE" > "\$LOG_DIR/gateway.log" 2>&1 &
+    echo \$! > "\$GATEWAY_PID_FILE"
+    echo "Audio Gateway 启动成功，PID=\$(cat "\$GATEWAY_PID_FILE")"
+}
+
+stop_one() {
+    local name="\$1"
+    local pid_file="\$2"
+
+    if ! is_running "\$pid_file"; then
+        echo "\$name 未运行"
+        rm -f "\$pid_file"
+        return
+    fi
+
+    local pid
+    pid="\$(cat "\$pid_file")"
+
+    echo "正在停止 \$name，PID=\$pid"
+    kill "\$pid" 2>/dev/null || true
+
+    for i in \$(seq 1 10); do
+        if ! kill -0 "\$pid" 2>/dev/null; then
+            rm -f "\$pid_file"
+            echo "\$name 已停止"
+            return
+        fi
+        sleep 1
+    done
+
+    echo "\$name 未正常退出，强制停止"
+    kill -9 "\$pid" 2>/dev/null || true
+    rm -f "\$pid_file"
+}
+
+start_all() {
+    start_provider
+    sleep 1
+    start_gateway
+}
+
+stop_all() {
+    stop_one "Audio Gateway" "\$GATEWAY_PID_FILE"
+    stop_one "ASR Provider" "\$PROVIDER_PID_FILE"
+}
+
+status_one() {
+    local name="\$1"
+    local pid_file="\$2"
+
+    if is_running "\$pid_file"; then
+        echo "\$name: running, PID=\$(cat "\$pid_file")"
+    else
+        echo "\$name: stopped"
+    fi
+}
+
+status_all() {
+    status_one "ASR Provider" "\$PROVIDER_PID_FILE"
+    status_one "Audio Gateway" "\$GATEWAY_PID_FILE"
+}
+
+case "\${1:-start}" in
+    start)
+        start_all
+        ;;
+
+    stop)
+        stop_all
+        ;;
+
+    restart)
+        stop_all
+        sleep 1
+        start_all
+        ;;
+
+    status)
+        status_all
+        ;;
+
+    logs)
+        echo "Provider log: \$LOG_DIR/provider.log"
+        echo "Gateway log:  \$LOG_DIR/gateway.log"
+        ;;
+
+    *)
+        echo "用法: \$0 {start|stop|restart|status|logs}"
+        exit 1
+        ;;
+esac
 EOF
 
 chmod +x "$DIST_DIR/run.sh"
+
 
 # ================= [6] 压缩 =================
 
